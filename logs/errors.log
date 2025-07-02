@@ -1,0 +1,10 @@
+2025-07-01 11:19:06,763 [ERROR] mqtt_redis_ingestion.core.redis_client - redis_client.py:86 - _setup_client(): Failed to setup Redis client: Error 10061 connecting to localhost:6379. No connection could be made because the target machine actively refused it.
+2025-07-01 11:20:50,067 [ERROR] mqtt_redis_ingestion.core.redis_client - redis_client.py:86 - _setup_client(): Failed to setup Redis client: invalid username-password pair or user is disabled.
+2025-07-02 09:30:38,816 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,756 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,802 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,805 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,806 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,866 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:43,866 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'
+2025-07-02 09:30:48,827 [ERROR] mqtt_redis_ingestion.core.data_processor - data_processor.py:185 - _validate_message(): Error during message validation: 'topic'

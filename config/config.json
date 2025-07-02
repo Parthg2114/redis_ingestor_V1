@@ -1,0 +1,45 @@
+{
+  "mqtt": {
+    "broker": {
+      "host": "192.168.17.129",
+      "port": 8883,
+      "keepalive": 60,
+      "clean_session": true
+    },
+    "auth": {
+      "username": "bbruser",
+      "password": "bbrpassword"
+    },
+    "topics": [
+      "#"
+    ],
+    "qos": 1,
+    "reconnect": {
+      "max_retries": 5,
+      "retry_delay": 5
+    }
+  },
+  "redis": {
+    "host": "192.168.17.129",
+    "port": 6379,
+    "db": 0,
+    "username": "bbruser",
+    "password": "bbrpassword",
+    "connection_pool": {
+      "max_connections": 10,
+      "retry_on_timeout": true
+    },
+    "key_prefix": "mqtt_data:",
+    "ttl": 3600
+  },
+  "data_processing": {
+    "batch_size": 100,
+    "flush_interval": 30,
+    "data_validation": true
+  },
+  "application": {
+    "name": "MQTT-Redis Data Ingestion",
+    "version": "1.0.0",
+    "environment": "development"
+  }
+}
