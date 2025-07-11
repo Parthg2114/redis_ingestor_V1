@@ -1,323 +1,327 @@
-"""
-MQTT Client Module
-
-This module provides MQTT client functionality with automatic reconnection,
-error handling, and integration with the Redis storage system.
-"""
-
 import json
 import time
 import threading
-from typing import Callable, Dict, Any, List, Optional
+import re
+from typing import Callable, Dict, Any, List, Optional, Union
 from queue import Queue, Empty
-
+from datetime import datetime
 import paho.mqtt.client as mqtt
 
 from ..config.config_manager import config_manager
 from ..utils.logger import get_logger
 from ..utils.exceptions import (
-    MQTTConnectionError, 
-    MQTTSubscriptionError, 
-    TemporaryConnectionError,
+    MQTTConnectionError,
+    MQTTSubscriptionError,
     ConfigurationError
 )
 
 
-class MQTTClient:
-    """
-    MQTT Client with automatic reconnection and message queuing.
-    """
-    
+class UniversalMQTTClient:
+
     def __init__(self, on_message_callback: Optional[Callable] = None):
-        """
-        Initialize MQTT client.
-        
-        Args:
-            on_message_callback: Callback function to handle received messages
-        """
         self.logger = get_logger(__name__)
         self.config = config_manager.get_mqtt_config()
-        
         if not self.config:
             raise ConfigurationError("MQTT configuration not found")
-        
-        # Initialize client
+
+        self.format_detectors = {
+            'industrial_simulator': self._detect_industrial_simulator,
+            'flat_device_id': self._detect_flat_device_id,
+            'nested_data': self._detect_nested_data,
+            'topic_based': self._detect_topic_based,
+            'array_format': self._detect_array_format,
+            'minimal_sensor': self._detect_minimal_sensor
+        }
+
+        self.category_patterns = {
+            'motor': ['motor', 'rpm', 'vibration', 'torque'],
+            'water': ['water', 'flow', 'pressure', 'ph'],
+            'energy': ['power', 'voltage', 'current', 'solar'],
+            'building': ['hvac', 'climate', 'temp', 'humidity'],
+            'packaging': ['packaging', 'conveyor', 'line'],
+            'test': ['test']
+        }
+
         self.client = None
         self.connected = False
         self.subscribed_topics = set()
         self.message_queue = Queue()
         self.stop_event = threading.Event()
-        
-        # Callbacks
         self.on_message_callback = on_message_callback
-        
-        # Connection parameters
-        self.broker_config = self.config.get('broker', {})
-        self.auth_config = self.config.get('auth', {})
-        self.reconnect_config = self.config.get('reconnect', {})
-        
+
+        self.broker_cfg = self.config.get('broker', {})
+        self.auth_cfg = self.config.get('auth', {})
+        self.reconnect_cfg = self.config.get('reconnect', {})
+
+        self.stats = {
+            'messages_received': 0,
+            'messages_processed': 0,
+            'processing_errors': 0,
+            'devices_seen': set(),
+            'formats_seen': {},
+            'categories_seen': {}
+        }
+
         self._setup_client()
-    
+
     def _setup_client(self):
-        """Set up MQTT client with configuration."""
-        try:
-            # Create client instance
-            client_id = f"{config_manager.get('application.name', 'mqtt_client')}_{int(time.time())}"
-            self.client = mqtt.Client(
-                client_id=client_id,
-                clean_session=self.broker_config.get('clean_session', True)
-            )
-            
-            # Set authentication if provided
-            username = self.auth_config.get('username')
-            password = self.auth_config.get('password')
-            if username and password:
-                self.client.username_pw_set(username, password)
-            
-            # Set callbacks
-            self.client.on_connect = self._on_connect
-            self.client.on_disconnect = self._on_disconnect
-            self.client.on_message = self._on_message
-            self.client.on_log = self._on_log
-            
-            # Configure keep alive and other options
-            keepalive = self.broker_config.get('keepalive', 60)
-            
-            self.logger.info("MQTT client configured successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to setup MQTT client: {e}")
-            raise MQTTConnectionError(f"Client setup failed: {e}")
-    
-    def connect(self) -> bool:
-        """
-        Connect to MQTT broker with retry logic.
+        client_id = f"{config_manager.get('application.name', 'universal_mqtt')}_{int(time.time())}"
+        self.client = mqtt.Client(client_id=client_id, clean_session=self.broker_cfg.get('clean_session', True))
         
-        Returns:
-            bool: True if connected successfully, False otherwise
-        """
+        if self.auth_cfg.get('username') and self.auth_cfg.get('password'):
+            self.client.username_pw_set(self.auth_cfg['username'], self.auth_cfg['password'])
+        
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+        self.client.on_log = self._on_log
+        
+        self.logger.info("Universal MQTT client configured")
+
+    def connect(self):
         if self.connected:
-            self.logger.info("Already connected to MQTT broker")
             return True
         
-        host = self.broker_config.get('host', 'localhost')
-        port = self.broker_config.get('port', 1883)
-        keepalive = self.broker_config.get('keepalive', 60)
+        host = self.broker_cfg.get('host', 'localhost')
+        port = self.broker_cfg.get('port', 1883)
+        keepalive = self.broker_cfg.get('keepalive', 60)
+        retries = self.reconnect_cfg.get('max_retries', 5)
+        delay = self.reconnect_cfg.get('retry_delay', 5)
         
-        max_retries = self.reconnect_config.get('max_retries', 5)
-        retry_delay = self.reconnect_config.get('retry_delay', 5)
-        
-        for attempt in range(max_retries):
+        for attempt in range(retries):
             try:
-                self.logger.info(f"Connecting to MQTT broker {host}:{port} (attempt {attempt + 1}/{max_retries})")
-                
-                result = self.client.connect(host, port, keepalive)
-                
-                if result == mqtt.MQTT_ERR_SUCCESS:
-                    # Start the network loop
+                self.logger.info(f"Connecting to MQTT broker {host}:{port} (attempt {attempt+1}/{retries})")
+                res = self.client.connect(host, port, keepalive)
+                if res == mqtt.MQTT_ERR_SUCCESS:
                     self.client.loop_start()
-                    
-                    # Wait for connection confirmation
-                    start_time = time.time()
-                    while not self.connected and time.time() - start_time < 10:
+                    for _ in range(100):
+                        if self.connected:
+                            return True
                         time.sleep(0.1)
-                    
-                    if self.connected:
-                        self.logger.info("Successfully connected to MQTT broker")
-                        return True
-                    else:
-                        self.logger.warning("Connection timeout - no confirmation received")
-                
             except Exception as e:
-                self.logger.error(f"Connection attempt {attempt + 1} failed: {e}")
+                self.logger.error(f"Connect attempt failed: {e}")
             
-            if attempt < max_retries - 1:
-                self.logger.info(f"Waiting {retry_delay} seconds before retry...")
-                time.sleep(retry_delay)
+            time.sleep(delay)
         
-        raise MQTTConnectionError(f"Failed to connect after {max_retries} attempts")
-    
-    def disconnect(self):
-        """Disconnect from MQTT broker."""
-        if self.client and self.connected:
-            self.logger.info("Disconnecting from MQTT broker...")
-            self.stop_event.set()
-            self.client.loop_stop()
-            self.client.disconnect()
-            self.connected = False
-    
-    def subscribe_to_topics(self, topics: Optional[List[str]] = None) -> bool:
-        """
-        Subscribe to MQTT topics.
-        
-        Args:
-            topics: List of topics to subscribe to. If None, uses config topics.
-            
-        Returns:
-            bool: True if all subscriptions successful
-        """
+        raise MQTTConnectionError("Failed to connect to MQTT broker")
+
+    def subscribe_to_topics(self, topics: Optional[List[str]] = None):
         if not self.connected:
-            raise MQTTConnectionError("Not connected to MQTT broker")
+            raise MQTTConnectionError("Not connected")
         
         if topics is None:
             topics = self.config.get('topics', [])
         
         if not topics:
-            raise ConfigurationError("No topics specified for subscription")
+            raise ConfigurationError("No topics configured")
         
         qos = self.config.get('qos', 1)
-        success_count = 0
-        
-        for topic in topics:
-            try:
-                result, mid = self.client.subscribe(topic, qos)
-                if result == mqtt.MQTT_ERR_SUCCESS:
-                    self.subscribed_topics.add(topic)
-                    success_count += 1
-                    self.logger.info(f"Subscribed to topic: {topic}")
-                else:
-                    self.logger.error(f"Failed to subscribe to topic {topic}: {result}")
-            except Exception as e:
-                self.logger.error(f"Exception subscribing to topic {topic}: {e}")
-        
-        if success_count == 0:
-            raise MQTTSubscriptionError("Failed to subscribe to any topics")
-        elif success_count < len(topics):
-            self.logger.warning(f"Subscribed to {success_count}/{len(topics)} topics")
-        
-        return success_count == len(topics)
-    
+        for t in topics:
+            res, _ = self.client.subscribe(t, qos)
+            if res == mqtt.MQTT_ERR_SUCCESS:
+                self.subscribed_topics.add(t)
+                self.logger.info(f"Subscribed to {t}")
+            else:
+                self.logger.error(f"Failed subscribing to {t}")
+
+    def disconnect(self):
+        if self.client and self.connected:
+            self.stop_event.set()
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.connected = False
+
     def _on_connect(self, client, userdata, flags, rc):
-        """Callback for successful connection."""
-        if rc == 0:
-            self.connected = True
-            self.logger.info(f"Connected to MQTT broker with result code {rc}")
+        self.connected = rc == 0
+        if self.connected:
+            self.logger.info("MQTT connected")
         else:
-            self.logger.error(f"Failed to connect to MQTT broker with result code {rc}")
-    
+            self.logger.error(f"MQTT connect failed rc={rc}")
+
     def _on_disconnect(self, client, userdata, rc):
-        """Callback for disconnection."""
         self.connected = False
-        self.subscribed_topics.clear()
-        
         if rc != 0:
-            self.logger.warning(f"Unexpected disconnection with result code {rc}")
-            # Attempt to reconnect
+            self.logger.warning("Unexpected disconnect, will reconnect")
             threading.Thread(target=self._reconnect_loop, daemon=True).start()
-        else:
-            self.logger.info("Disconnected from MQTT broker")
-    
+
     def _on_message(self, client, userdata, msg):
-        """Callback for received messages."""
         try:
-            # Decode message
-            topic = msg.topic
-            payload = msg.payload.decode('utf-8')
-            qos = msg.qos
-            timestamp = time.time()
+            self.stats['messages_received'] += 1
             
-            message_data = {
-                'topic': topic,
-                'payload': payload,
-                'qos': qos,
-                'timestamp': timestamp
-            }
+            payload_str = msg.payload.decode('utf-8')
+            normalized = self._normalize_payload(payload_str, msg.topic, time.time())
             
-            # Add to internal queue
-            self.message_queue.put(message_data)
-            
-            # Call external callback if provided
-            if self.on_message_callback:
-                self.on_message_callback(message_data)
-            
-            self.logger.debug(f"Received message on topic {topic}: {payload}")
-            
-       
-        
-        
+            if normalized and self.on_message_callback:
+                # Update stats
+                device_id = normalized.get('device_id', 'unknown')
+                format_type = normalized.get('metadata', {}).get('source_format', 'unknown')
+                category = normalized.get('device_category', 'unknown')
+                
+                self.stats['devices_seen'].add(device_id)
+                self.stats['formats_seen'][format_type] = self.stats['formats_seen'].get(format_type, 0) + 1
+                self.stats['categories_seen'][category] = self.stats['categories_seen'].get(category, 0) + 1
+                
+                self.on_message_callback(normalized)
+                self.stats['messages_processed'] += 1
+                
         except Exception as e:
-            self.logger.error(f"Error processing received message: {e}")
-    
+            self.stats['processing_errors'] += 1
+            self.logger.error(f"Message processing error: {e}")
+
     def _on_log(self, client, userdata, level, buf):
-        """Callback for MQTT client logs."""
-        self.logger.debug(f"MQTT Log: {buf}")
-    
+        self.logger.debug(buf)
+
     def _reconnect_loop(self):
-        """Background thread for reconnection attempts."""
-        retry_delay = self.reconnect_config.get('retry_delay', 5)
-        max_retries = self.reconnect_config.get('max_retries', 5)
-        
-        for attempt in range(max_retries):
-            if self.connected or self.stop_event.is_set():
-                break
-            
-            self.logger.info(f"Attempting to reconnect... (attempt {attempt + 1}/{max_retries})")
-            
+        delay = self.reconnect_cfg.get('retry_delay', 5)
+        while not self.connected and not self.stop_event.is_set():
             try:
-                result = self.client.reconnect()
-                if result == mqtt.MQTT_ERR_SUCCESS:
-                    self.logger.info("Reconnection successful")
-                    # Re-subscribe to topics
-                    if self.subscribed_topics:
-                        self.subscribe_to_topics(list(self.subscribed_topics))
-                    break
-            except Exception as e:
-                self.logger.error(f"Reconnection attempt failed: {e}")
-            
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-        
-        if not self.connected:
-            self.logger.error("Failed to reconnect after maximum attempts")
-    
-    def get_message(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
-        """
-        Get message from internal queue.
-        
-        Args:
-            timeout: Timeout in seconds
-            
-        Returns:
-            Message data or None if no message available
-        """
+                self.client.reconnect()
+            except Exception:
+                pass
+            time.sleep(delay)
+
+    def _normalize_payload(self, payload: str, topic: str, mqtt_ts: float) -> Optional[Dict[str, Any]]:
         try:
-            return self.message_queue.get(timeout=timeout)
-        except Empty:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            self.logger.warning("Non-JSON payload ignored")
             return None
-    
-    def get_messages(self, max_messages: int = 100, timeout: float = 1.0) -> List[Dict[str, Any]]:
-        """
-        Get multiple messages from internal queue.
         
-        Args:
-            max_messages: Maximum number of messages to retrieve
-            timeout: Timeout in seconds for the first message
-            
-        Returns:
-            List of message data
-        """
-        messages = []
+        fmt = self._detect_payload_format(data, topic)
+        norm = self._apply_normalization(data, topic, mqtt_ts, fmt)
+        return norm
+
+    def _detect_payload_format(self, data: Union[Dict, List], topic: str) -> str:
+        for name, fn in self.format_detectors.items():
+            try:
+                if fn(data, topic):
+                    return name
+            except Exception:
+                continue
+        return 'unknown'
+
+    def _detect_industrial_simulator(self, d, topic):
+        return isinstance(d, dict) and 'deviceDisplayName' in d and 'data' in d
+
+    def _detect_flat_device_id(self, d, topic):
+        return isinstance(d, dict) and any(k in d for k in ['deviceId', 'device_id', 'deviceID']) and 'data' not in d
+
+    def _detect_nested_data(self, d, topic):
+        return isinstance(d, dict) and any(k in d for k in ['deviceId', 'device_id', 'deviceID']) and 'data' in d
+
+    def _detect_topic_based(self, d, topic):
+        return isinstance(d, dict) and 'deviceDisplayName' not in d and not any(k.startswith('device') for k in d)
+
+    def _detect_array_format(self, d, topic):
+        return isinstance(d, list) and d and all(isinstance(i, dict) and 'field' in i and 'value' in i for i in d)
+
+    def _detect_minimal_sensor(self, d, topic):
+        return isinstance(d, dict)
+
+    def _apply_normalization(self, data: Union[Dict, List], topic: str, mqtt_ts: float, fmt: str) -> Dict[str, Any]:
+        base = {
+            'metadata': {
+                'source_format': fmt,
+                'mqtt_topic': topic,
+                'mqtt_received_at': mqtt_ts
+            }
+        }
+
+        if fmt == 'industrial_simulator':
+            base.update({
+                'device_id': self._clean(data['deviceDisplayName']),
+                'timestamp': self._parse_ts(data['timestamp']) or mqtt_ts,
+                'sensor_data': data.get('data', {})
+            })
+        elif fmt == 'flat_device_id':
+            dev = data.get('deviceId') or data.get('device_id') or data.get('deviceID')
+            ts = data.pop('timestamp', None) or data.pop('time', None) or data.pop('ts', None)
+            sensor = {k: v for k, v in data.items() if not k.startswith('device')}
+            base.update({
+                'device_id': self._clean(str(dev)), 
+                'timestamp': self._parse_ts(ts) or mqtt_ts, 
+                'sensor_data': sensor
+            })
+        elif fmt == 'nested_data':
+            dev = data.get('deviceId') or data.get('device_id') or data.get('deviceID')
+            ts = data.get('timestamp')
+            base.update({
+                'device_id': self._clean(str(dev)), 
+                'timestamp': self._parse_ts(ts) or mqtt_ts, 
+                'sensor_data': data.get('data', {})
+            })
+        elif fmt == 'topic_based':
+            dev = self._device_from_topic(topic)
+            ts = data.pop('timestamp', None)
+            base.update({
+                'device_id': dev, 
+                'timestamp': self._parse_ts(ts) or mqtt_ts, 
+                'sensor_data': data
+            })
+        elif fmt == 'array_format':
+            dev = self._device_from_topic(topic)
+            sensor = {item['field']: item['value'] for item in data}
+            ts = sensor.pop('timestamp', None) if 'timestamp' in sensor else None
+            base.update({
+                'device_id': dev, 
+                'timestamp': self._parse_ts(ts) or mqtt_ts, 
+                'sensor_data': sensor
+            })
+        else:  # minimal or unknown
+            dev = self._device_from_topic(topic)
+            ts = data.pop('timestamp', None)
+            base.update({
+                'device_id': dev, 
+                'timestamp': self._parse_ts(ts) or mqtt_ts, 
+                'sensor_data': data
+            })
+
+        # Add ISO datetime and category
+        base['datetime'] = datetime.fromtimestamp(base['timestamp']).isoformat()
+        base['device_category'] = self._detect_category(base['device_id'], base['sensor_data'])
+        return base
+
+    def _parse_ts(self, ts):
+        if not ts:
+            return None
+        try:
+            if isinstance(ts, (int, float)):
+                return float(ts) if ts > 0 else None
+            if isinstance(ts, str):
+                if ts.endswith('Z'):
+                    ts = ts[:-1] + '+00:00'
+                return datetime.fromisoformat(ts).timestamp()
+        except Exception:
+            return None
+        return None
+
+    def _clean(self, s):
+        return re.sub(r'[^a-zA-Z0-9_-]', '_', s.lower())
+
+    def _device_from_topic(self, topic):
+        return self._clean(topic.split('/')[-1])
+
+    def _detect_category(self, dev, data):
+        dev_l = dev.lower()
+        for cat, pats in self.category_patterns.items():
+            if any(p in dev_l for p in pats):
+                return cat
         
-        # Get first message with timeout
-        first_message = self.get_message(timeout)
-        if first_message:
-            messages.append(first_message)
+        keys = ' '.join(data.keys()).lower()
+        for cat, pats in self.category_patterns.items():
+            if any(p in keys for p in pats):
+                return cat
         
-        # Get additional messages without blocking
-        while len(messages) < max_messages:
-            message = self.get_message(timeout=0.01)
-            if message is None:
-                break
-            messages.append(message)
-        
-        return messages
-    
+        return 'general'
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get client statistics."""
+        stats = self.stats.copy()
+        stats['devices_seen'] = list(stats['devices_seen'])
+        stats['is_connected'] = self.connected
+        return stats
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected."""
         return self.connected
-    
-    @property
-    def queue_size(self) -> int:
-        """Get current message queue size."""
-        return self.message_queue.qsize()
