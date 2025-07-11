@@ -1,10 +1,3 @@
-"""
-Custom Exceptions Module
-
-This module defines custom exceptions for the MQTT-Redis ingestion system.
-It provides specific exception types for different error scenarios.
-"""
-
 class MQTTRedisIngestionError(Exception):
     """Base exception for all MQTT-Redis ingestion errors."""
     
