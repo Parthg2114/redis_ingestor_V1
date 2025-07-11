@@ -1,11 +1,3 @@
-"""
-Logging Utilities Module
-
-This module provides logging configuration and utilities for the MQTT-Redis
-ingestion system. It loads logging configuration from JSON and provides
-easy access to configured loggers.
-"""
-
 import json
 import logging
 import logging.config
