@@ -1,22 +1,10 @@
-"""
-Configuration Manager Module
-
-This module handles loading and managing configuration from JSON files.
-It provides a singleton pattern to ensure consistent configuration access
-across the application.
-"""
-
 import json
 import os
 from typing import Dict, Any, Optional
 from pathlib import Path
 
 class ConfigManager:
-    """
-    Singleton configuration manager that loads and provides access to 
-    application configuration from JSON files.
-    """
-    
+   
     _instance = None
     _config = None
     
@@ -30,18 +18,9 @@ class ConfigManager:
             self._config = self._load_config()
     
     def _load_config(self) -> Dict[str, Any]:
-        """
-        Load configuration from JSON file.
         
-        Returns:
-            Dict containing the configuration data
-            
-        Raises:
-            FileNotFoundError: If config file is not found
-            json.JSONDecodeError: If config file contains invalid JSON
-        """
         try:
-            # Look for config file in multiple locations
+            
             possible_paths = [
                 Path("config/config.json"),
                 Path("../config/config.json"),
@@ -69,16 +48,7 @@ class ConfigManager:
             raise json.JSONDecodeError(f"Invalid JSON in configuration file: {e}")
     
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a configuration value using dot notation.
-        
-        Args:
-            key: Configuration key in dot notation (e.g., 'mqtt.broker.host')
-            default: Default value if key is not found
-            
-        Returns:
-            Configuration value or default
-        """
+       
         keys = key.split('.')
         value = self._config
         
